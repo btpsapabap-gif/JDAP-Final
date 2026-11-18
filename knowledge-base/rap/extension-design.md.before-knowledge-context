@@ -1,0 +1,22 @@
+---
+id: rap-extension-design
+title: Choosing a RAP extension design
+summary: Decide whether a requirement needs a transactional business object and document its extension boundaries.
+tags: rap, extension, clean-core, design
+sourceName: JDAP working guidance
+updated: 2026-11-16
+---
+
+## Decide whether RAP fits
+
+Use a RAP design when the requirement needs a transactional business object with lifecycle behavior, validations, actions, or an application service. A read-only extract may need a different shape; do not introduce a transactional model without a business reason.
+
+## Design review points
+
+- Identify the business object, ownership, lifecycle, and source of truth.
+- Prefer released extension points and released APIs for the target product and release.
+- Separate interface, projection, behavior, and service concerns according to the target platform's supported model.
+- Define authorization, locking, validation, error, and draft behavior explicitly.
+- Include a test plan for behavior and service exposure, not just syntax.
+
+Confirm syntax, feature support, and release contracts in the target system. JDAP guidance is not a substitute for SAP documentation or ATC verification.

@@ -1,0 +1,23 @@
+---
+id: cds-released-api-evidence
+title: Recording CDS API release evidence
+summary: Capture the target-system evidence needed before using a CDS view as a stable application interface.
+tags: cds, released-api, clean-core, atc
+sourceName: JDAP working guidance
+updated: 2026-11-16
+workflowApproved: true
+---
+
+## Before choosing a view
+
+Confirm the exact CDS entity and fields exist in the target system. Check its release state and intended use in the system's available repository tools and documentation. Similar names do not establish that two views have the same contract.
+
+## Record the evidence
+
+- Target SAP product, release, and system/client context.
+- CDS entity name and the release/API state shown by the target system.
+- Required fields and associations, plus any relevant compatibility constraints.
+- Authorization behavior and the business roles that are expected to read the data.
+- ATC variant, execution date, findings, and disposition.
+
+JDAP's offline checks cannot establish a CDS view's release contract or authorization behavior. Treat the target-system evidence and ATC result as the decision record.

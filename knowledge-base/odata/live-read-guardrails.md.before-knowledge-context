@@ -1,0 +1,24 @@
+---
+id: odata-live-read-guardrails
+title: Guardrails for live OData reads
+summary: Keep SAP Gateway reads explicit, bounded, and separate from repository development operations.
+tags: odata, integration, read-only, security
+sourceName: JDAP working guidance
+updated: 2026-11-16
+---
+
+## Choose the right interface
+
+OData exposes application data through a service. ADT exposes development repository capabilities. A reachable OData service does not imply source-code read, object creation, or activation access.
+
+## Keep reads bounded
+
+- Name the service and entity set explicitly.
+- Request only needed fields and a small, intentional number of rows.
+- Avoid persisting sample business values in workflow history or logs unless an approved business need requires it.
+- Surface timeouts, authentication failures, and SAP errors without exposing credentials.
+- Re-check the service's authorization and data-handling rules with the SAP owner.
+
+## Transport note
+
+HTTP does not encrypt credentials or returned business data in transit. Use only on a network path whose transport protection and access controls are accepted for the environment; prefer properly trusted HTTPS where available.

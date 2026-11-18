@@ -1,0 +1,135 @@
+﻿import React, { useEffect, useState } from "react";
+import Sidebar from "./components/Sidebar.jsx";
+import Topbar from "./components/Topbar.jsx";
+import PageHeading from "./components/PageHeading.jsx";
+import AiDeveloper from "./pages/AiDeveloper.jsx";
+import WorkflowHistory from "./pages/WorkflowHistory.jsx";
+import AgentWorkforce from "./pages/AgentWorkforce.jsx";
+import ModulePlaceholder from "./pages/ModulePlaceholder.jsx";
+import SapSystems from "./pages/SapSystems.jsx";
+import TestingCenter from "./pages/TestingCenter.jsx";
+import Approvals from "./pages/Approvals.jsx";
+import KnowledgeHub from "./pages/KnowledgeHub.jsx";
+
+const INITIAL_PROMPT = "Create an ABAP report to extract billing document header and item data, with safe selection criteria and an implementation test plan.";
+
+export default function App() {
+  const [page,setPage]=useState("AI Developer");
+  const [agents,setAgents]=useState([]);
+  const [systems,setSystems]=useState([]);
+  const [systemId,setSystemId]=useState("mock-ecc");
+  const [includeSapContext,setIncludeSapContext]=useState(false);
+  const [referenceWorkflowId,setReferenceWorkflowId]=useState("");
+  const [prompt,setPrompt]=useState(INITIAL_PROMPT);
+  const [busy,setBusy]=useState(false);
+  const [result,setResult]=useState(null);
+  const [error,setError]=useState("");
+  const [canRetryMock,setCanRetryMock]=useState(false);
+  const [health,setHealth]=useState(null);
+  const [sapConnection,setSapConnection]=useState(null);
+  const [adtConnection,setAdtConnection]=useState(null);
+  const [sapEntitySet,setSapEntitySet]=useState("");
+  const [workflows,setWorkflows]=useState([]);
+  const [historyBusy,setHistoryBusy]=useState(false);
+  const [historyError,setHistoryError]=useState("");
+  const [selectedHistory,setSelectedHistory]=useState(null);
+
+  useEffect(()=>{
+    Promise.all([
+      fetch("/api/agents").then(r=>r.json()),
+      fetch("/api/systems").then(r=>r.json()),
+      fetch("/api/health").then(r=>r.json())
+    ]).then(([a,s,h])=>{setAgents(a);setSystems(s);setHealth(h)}).catch(e=>setError("API unavailable: "+e.message));
+    fetch("/api/sap/odata/connection").then(r=>r.json()).then(result=>{setSapConnection(result);if(result.entitySet)setSapEntitySet(current=>current||result.entitySet)}).catch(()=>setSapConnection({state:"unknown"}));
+    fetch("/api/sap/adt/connection").then(r=>r.json()).then(setAdtConnection).catch(()=>setAdtConnection({state:"unknown"}));
+  },[]);
+
+  useEffect(()=>{
+    fetch("/api/workflows").then(async r=>{const d=await r.json();if(r.ok)setWorkflows(d)}).catch(()=>{});
+  },[]);
+
+  useEffect(()=>{
+    if(page!=="Workflow History")return;
+    setHistoryBusy(true);setHistoryError("");
+    fetch("/api/workflows").then(async r=>{
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.error||"Could not load workflow history");
+      setWorkflows(d);
+    }).catch(e=>setHistoryError(e.message)).finally(()=>setHistoryBusy(false));
+  },[page]);
+
+  async function run(providerOverride, useSapContext=false, selectedEntitySet=sapEntitySet, selectedReferenceWorkflow=referenceWorkflowId){
+    setBusy(true);setError("");setCanRetryMock(false);setResult(null);
+    try{
+      const body={prompt,systemId,includeSapContext:useSapContext,sapEntitySet:selectedEntitySet,...(selectedReferenceWorkflow?{referenceWorkflowId:selectedReferenceWorkflow}:{}),...(providerOverride?{aiProvider:providerOverride}:{})};
+      const r=await fetch("/api/workflows/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      let d=await r.json();
+      if(!r.ok)throw new Error(d.error||"Workflow failed");
+      setResult(d);
+      while(d.status==="RUNNING"){
+        await new Promise(resolve=>setTimeout(resolve,100));
+        const poll=await fetch(`/api/workflows/${d.id}`);
+        d=await poll.json();
+        if(!poll.ok)throw new Error(d.error||"Could not read workflow progress");
+        setResult(d);
+      }
+      if(d.status==="FAILED")throw new Error(d.error||"Workflow failed");
+    }catch(e){
+      setError(e.message);
+      setCanRetryMock((health?.aiProvider||"").toLowerCase()==="openai"&&/credit|quota|billing|429|insufficient/i.test(e.message));
+    }finally{setBusy(false)}
+  }
+
+  function downloadDraft(content, fallbackFilename){
+    const programName = String(content).match(/^\s*(?:REPORT|PROGRAM)\s+([A-Z][A-Z0-9_]*)\s*\./im)?.[1];
+    const filename = programName ? `${programName.toUpperCase()}.md` : fallbackFilename;
+    const blob=new Blob([content],{type:"text/markdown"});
+    const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=filename;a.click();URL.revokeObjectURL(a.href);
+  }
+
+  function downloadResult(){
+    if(!result?.artifact?.content)return;
+    downloadDraft(result.artifact.content,"jdap-development-draft.md");
+  }
+
+  async function openHistory(item){
+    if(!item.artifact_id)return;
+    try{
+      const r=await fetch(`/api/artifacts/${item.artifact_id}`);const d=await r.json();
+      if(!r.ok)throw new Error(d.error||"Could not load draft");
+      setSelectedHistory({...item,artifact:d});
+    }catch(e){window.alert(e.message)}
+  }
+
+  async function requestApproval(artifactId){
+    const requestNote=window.prompt("Add a note for the local draft reviewer (optional):","");
+    if(requestNote===null)return;
+    try{
+      const r=await fetch("/api/approvals",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({artifactId,requestNote})});
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.error||"Could not request draft approval");
+      setPage("Approvals");setSelectedHistory(null);
+    }catch(e){setHistoryError(e.message)}
+  }
+
+  function downloadHistory(){
+    if(!selectedHistory?.artifact?.content)return;
+    downloadDraft(selectedHistory.artifact.content,`jdap-workflow-${selectedHistory.id.slice(0,8)}.md`);
+  }
+
+  function navigate(label){setPage(label);setSelectedHistory(null)}
+  const latestAbapDraft = result?.artifact?.content?.match(/## ABAP draft\s+```abap\s*([\s\S]*?)```/i)?.[1]?.trim() || "";
+
+  return <div className="app">
+    <Sidebar page={page} onNavigate={navigate} agentCount={agents.length} aiProvider={health?.aiProvider} sapState={sapConnection?.state} adtState={adtConnection?.state}/>
+    <main className="main">
+      <Topbar page={page} database={health?.database} aiProvider={health?.aiProvider} sapState={sapConnection?.state} adtState={adtConnection?.state}/>
+      <section className="content">
+        <PageHeading page={page} database={health?.database} sapState={sapConnection?.state}/>
+        {page==="AI Developer"?<AiDeveloper agents={agents} systems={systems} systemId={systemId} setSystemId={setSystemId} prompt={prompt} setPrompt={setPrompt} busy={busy} run={run} error={error} canRetryMock={canRetryMock} result={result} aiProvider={health?.aiProvider} sapState={sapConnection?.state} sapTransport={sapConnection?.transport} sapEntitySet={sapEntitySet} includeSapContext={includeSapContext} setIncludeSapContext={setIncludeSapContext} referenceWorkflowId={referenceWorkflowId} setReferenceWorkflowId={setReferenceWorkflowId} workflows={workflows} onViewAgents={()=>navigate("Agent Workforce")} onDownload={downloadResult}/>:page==="Workflow History"?<WorkflowHistory workflows={workflows} busy={historyBusy} error={historyError} selected={selectedHistory} onOpen={openHistory} onDownload={downloadHistory} onRequestApproval={requestApproval}/>:page==="Approvals"?<Approvals/>:page==="Knowledge Hub"?<KnowledgeHub/>:page==="Agent Workforce"?<AgentWorkforce agents={agents}/>:page==="SAP Systems"?<SapSystems systems={systems} entitySet={sapEntitySet} onEntitySetChange={setSapEntitySet}/>:page==="Testing Center"?<TestingCenter initialSource={latestAbapDraft} objectCreateEnabled={adtConnection?.objectCreateEnabled} objectActivationEnabled={adtConnection?.objectActivationEnabled}/>:<ModulePlaceholder page={page} agents={agents} systems={systems}/>}
+        <footer>JDAP Â· Joule Developer Agent Platform <span>Built for controlled SAP engineering workflows</span></footer>
+      </section>
+    </main>
+  </div>;
+}
+
