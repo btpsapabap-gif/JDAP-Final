@@ -1,0 +1,170 @@
+import { randomUUID } from "node:crypto";
+import { AGENTS } from "../agents/registry.js";
+import { runAgent } from "../agents/runner.js";
+import { discoverMockSystem } from "../integrations/sap-mock.js";
+import { evaluateAbapDraft, expectedReportName, normalizeAbapAgentOutput, renderDraftQualitySections } from "../integrations/abap-static/draft-quality.js";
+import { buildS4BillingExtractTemplate, isS4BillingExtractRequest } from "../integrations/abap-static/billing-extract-template.js";
+
+const HANDOFFS = {
+  abap: ["architect"],
+  "cds-rap": ["architect", "abap"],
+  fiori: ["architect", "cds-rap"],
+  integration: ["architect"],
+  debug: ["architect", "abap", "integration"],
+  testing: ["architect", "abap", "cds-rap", "fiori", "integration"],
+  review: ["abap", "cds-rap", "fiori", "integration"],
+  security: ["abap", "cds-rap", "fiori", "integration"],
+  compatibility: ["architect", "abap", "cds-rap", "fiori", "integration"],
+  documentation: ["architect", "abap", "testing", "review", "security"],
+  devops: ["architect", "testing", "review", "security", "documentation"]
+};
+
+const SELECTION_TEXTS = [
+  ["S_FKDAT", "Billing date"],
+  ["S_VBELN", "Billing document number"],
+  ["S_KUNAG", "Sold-to party"],
+  ["P_VKORG", "Sales organization"]
+];
+
+const AGENT_SELECTION_RULES = [
+  ["abap", /\babap\b|\b(report|program|include)\b|selection screen/i],
+  ["cds-rap", /\bcds\b|\brap\b|behavior definition|service definition|business object/i],
+  ["fiori", /\bfiori\b|\bsapui5\b|\bui5\b|user interface|list report|object page/i],
+  ["integration", /\b(idoc|rfc|bapi|odata|api|interface|integration)\b/i],
+  ["debug", /\b(debug|troubleshoot|dump|error analysis|incident)\b/i]
+];
+
+const SUPPORT_AGENT_RULES = [
+  ["testing", /\b(test|test plan|testing|qa|validate|validation|regression)\b/i],
+  ["security", /\b(secur|authori[sz]ation|permission|credential|safe|least privilege)\b/i],
+  ["review", /\b(review|refactor|code quality|performance|maintainability)\b/i],
+  ["compatibility", /\b(compatib|release|ecc|s\/4|s4hana|version)\b/i],
+  ["documentation", /\b(documentation|technical handover|readme|user guide)\b/i],
+  ["devops", /\b(devops|deploy|deployment|docker|pipeline|ci\/cd|transport)\b/i]
+];
+
+export function selectWorkflowAgents(prompt = "") {
+  const selected = new Set();
+  for (const [agentId, pattern] of AGENT_SELECTION_RULES) {
+    if (pattern.test(prompt)) selected.add(agentId);
+  }
+  for (const [agentId, pattern] of SUPPORT_AGENT_RULES) {
+    if (pattern.test(prompt)) selected.add(agentId);
+  }
+
+  // Architecture is useful for broad design or multi-domain work. Focused
+  // implementation requests go straight to the matching specialist.
+  const primaryCount = [...selected].filter(id => AGENT_SELECTION_RULES.some(([primaryId]) => primaryId === id)).length;
+  if (/\b(architect|architecture|solution design|system design|end-to-end|across|multiple applications)\b/i.test(prompt)
+    || primaryCount > 1
+    || selected.size === 0) {
+    selected.add("architect");
+  }
+
+  return AGENTS.filter(agent => selected.has(agent.id)).map(({ id, name }) => ({ id, name }));
+}
+
+function selectionTextsFor(source = "") {
+  return SELECTION_TEXTS.filter(([name]) => new RegExp(`\\b${name}\\b`, "i").test(source));
+}
+
+function normalizeSupportOutput(value = "") {
+  const withoutFencedCode = String(value).replace(/```[\s\S]*?(?:```|$)/g, "");
+  const abapCodeLine = /^\s*(?:REPORT\s+\w+|PROGRAM\s+\w+|SELECT(?:-OPTIONS)?\b|PARAMETERS?\b|DATA\s*:|TYPES\s*:|TABLES\s*:|CONSTANTS\s*:|(?:START|END)-OF-SELECTION\.|AUTHORITY-CHECK\b|LOOP AT\b|ENDLOOP\b|IF\b|ENDIF\b)/i;
+  const paragraphs = withoutFencedCode.split(/\n\s*\n/).filter(paragraph => {
+    const codeLines = paragraph.split(/\r?\n/).filter(line => abapCodeLine.test(line));
+    return codeLines.length < 2;
+  });
+  return paragraphs.join("\n\n").trim().slice(0, 5000);
+}
+
+function curatedS4BillingSupport(agentId) {
+  if (agentId === "testing") return [
+    "- In the target S/4 system, confirm both billing CDS views and every selected element are available and released for the installed version.",
+    "- Run the SAP syntax check and the configured Clean Core ATC variant; resolve all findings before approval.",
+    "- Verify that a single inclusive date interval up to 366 calendar days is accepted and larger or reversed intervals are rejected.",
+    "- Verify the optional billing-document and sold-to filters plus mandatory sales organization against authorized reference documents.",
+    "- Confirm a result set over 500 rows is stopped with a request to narrow the selection; confirm no SAP business data is changed.",
+    "- Test both authorized and unauthorized sales organizations and verify the SAP CDS authorization behavior."
+  ].join("\n");
+  if (agentId === "security") return [
+    "- The report is display-only and uses released billing CDS views; verify their availability, release contract, and CDS authorization behavior in the target system.",
+    "- Confirm V_VBRK_VKO display authorization for the selected sales organization and verify whether billing-type authorization is also required by the target design.",
+    "- Keep the mandatory date interval and 500-row cap; review output access and avoid exporting business data unnecessarily.",
+    "- This draft does not establish authorization sufficiency or Clean Core compliance. Record target-system ATC and security review evidence before approval."
+  ].join("\n");
+  return null;
+}
+
+export async function executeWorkflow({ prompt, systemId, model, provider, sapContext, referenceContext, onAgent }) {
+  if (!prompt?.trim()) throw new Error("A development prompt is required.");
+  const aiProvider = model ? (provider || model.provider || "openai") : "mock";
+  const system = await discoverMockSystem(systemId || "mock-ecc");
+  const context = {
+    system,
+    note: sapContext ? "Live OData read-only sample supplied; the SAP development repository was not accessed." : "Mock environment only; no live SAP repository was accessed.",
+    ...(referenceContext ? { referenceContext } : {}),
+    ...(sapContext ? { sapODataSample: { entitySet: sapContext.entitySet, transport: sapContext.transport, fields: sapContext.fields, firstRow: sapContext.sample } } : {})
+  };
+  const selectedAgents = selectWorkflowAgents(prompt);
+  const useCuratedBillingTemplate = isS4BillingExtractRequest(prompt, system);
+  const sequence = selectedAgents.map(agent => agent.id);
+  const outputs = {};
+  const activities = [];
+  const mockStepDelayMs = Math.max(0, Number(process.env.MOCK_AGENT_STEP_DELAY_MS ?? 200));
+  for (const agentId of sequence) {
+    const started = Date.now();
+    const event = { agentId, name: AGENTS.find(a => a.id === agentId).name, status: "RUNNING", durationMs: 0 };
+    activities.push(event);
+    if (onAgent) await onAgent(event);
+    if (!model && mockStepDelayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, mockStepDelayMs));
+    }
+    const priorAgentWork = Object.fromEntries((HANDOFFS[agentId] || [])
+      .filter(priorId => outputs[priorId])
+      .map(priorId => [priorId, outputs[priorId].slice(0, 1600)]));
+    const agentContext = { ...context, priorAgentWork };
+    if (sapContext && !["architect", "abap"].includes(agentId)) delete agentContext.sapODataSample;
+    const curatedSupport = useCuratedBillingTemplate ? curatedS4BillingSupport(agentId) : null;
+    const output = agentId === "abap" && useCuratedBillingTemplate
+      ? buildS4BillingExtractTemplate(prompt, referenceContext?.programName)
+      : curatedSupport || await runAgent(agentId, { prompt, system, context: agentContext }, model);
+    outputs[agentId] = agentId === "abap" ? normalizeAbapAgentOutput(output) : normalizeSupportOutput(output);
+    event.status = "COMPLETED";
+    event.durationMs = Date.now() - started;
+    if (onAgent) await onAgent(event);
+  }
+  const artifactId = randomUUID();
+  const selectionTexts = selectionTextsFor(outputs.abap);
+  const selectionTextsSection = selectionTexts.length
+    ? `## Selection screen texts\n\n${selectionTexts.map(([name, label]) => `- ${name}: ${label}`).join("\n")}\n\n`
+    : "";
+  const liveContextNote = sapContext
+    ? `\n## Live SAP data context\n- OData entity set: ${sapContext.entitySet}\n- Transport: ${sapContext.transport}\n- First-row fields supplied to agents: ${sapContext.fields.join(", ")}\n- SAP returned ${sapContext.rowsReceived} row(s) for a $top=1 request; JDAP retained only the first row.\n- A live data row was included in agent context; review generated content for sensitive values before sharing.\n`
+    : "";
+  const referenceContextNote = referenceContext
+    ? `\n## Approved JDAP reference\n- Prior workflow: ${referenceContext.workflowId}\n- Artifact: ${referenceContext.title}\n- Prior report name: ${referenceContext.programName || "not detected"}\n- Prior selection labels: ${referenceContext.selectionLabels || "none recorded"}\n- Source included for continuity: ${referenceContext.approvedSource ? (useCuratedBillingTemplate ? "not used by the curated ABAP generator" : "yes") : "no"}${referenceContext.sourceTruncatedForContext && !useCuratedBillingTemplate ? " (source excerpt limited to 6,000 characters)" : ""}\n- This is user-selected context; the current requirement takes precedence.\n`
+    : "";
+  const outputSections = [
+    ["architect", "Architecture"], ["abap", "ABAP draft"], ["cds-rap", "CDS / RAP"],
+    ["fiori", "Fiori"], ["integration", "Integration"], ["debug", "Debugging considerations"],
+    ["testing", "Testing"], ["review", "Code review"], ["security", "Security"],
+    ["compatibility", "Compatibility"], ["documentation", "Documentation"], ["devops", "DevOps"]
+  ].filter(([agentId]) => outputs[agentId]).map(([agentId, title]) => {
+    const body = agentId === "abap" ? `\`\`\`abap\n${outputs[agentId]}\n\`\`\`` : outputs[agentId];
+    return `## ${title}\n${body}`;
+  }).join("\n\n");
+  const continuityRequirement = referenceContext?.programName && !expectedReportName(prompt)
+    ? `${prompt}\nThe program name is ${referenceContext.programName}. Preserve it unless the current requirement explicitly specifies a different report name.`
+    : prompt;
+  const qualityGate = outputs.abap ? evaluateAbapDraft(outputs.abap, system, continuityRequirement) : null;
+  const generationMode = useCuratedBillingTemplate ? "CURATED_S4_BILLING_TEMPLATE" : "MODEL_GENERATED";
+  const qualitySections = renderDraftQualitySections(qualityGate);
+  const artifact = {
+    id: artifactId,
+    title: "Generated SAP development draft",
+    type: "text/markdown",
+    content: `# JDAP Development Draft\n\n## Execution context\n- AI provider: ${aiProvider.toUpperCase()}\n- SAP target: ${system.name} (${system.release}) — MOCK ONLY\n- Selected specialists: ${selectedAgents.map(agent => agent.name).join(", ")}\n- SAP development repository: not accessed; no SAP object writes occurred\n${useCuratedBillingTemplate ? "- ABAP generation: curated S/4 billing extraction template; the local model did not generate the ABAP source\n" : ""}${liveContextNote}${referenceContextNote}\n## Requirement\n${prompt}\n\n${qualitySections}${outputSections}\n\n${selectionTextsSection}---\n**Safety:** Draft only. No SAP repository write, activation, transport or deployment was performed.\n`
+  };
+  return { id: randomUUID(), status: "COMPLETED", aiProvider, generationMode, sapConnectivity: sapContext ? "LIVE ODATA READ ONLY" : "MOCK ONLY", system, selectedAgents, activities, outputs, qualityGate, referenceWorkflowId: referenceContext?.workflowId || null, artifact, createdAt: new Date().toISOString() };
+}

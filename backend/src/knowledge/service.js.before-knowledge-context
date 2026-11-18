@@ -1,0 +1,65 @@
+import { readdir, readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+const KNOWLEDGE_ROOT = fileURLToPath(new URL("../../knowledge-base/", import.meta.url));
+const DOMAINS = new Set(["abap", "cds", "rap", "odata", "sap-standards"]);
+
+function parseDocument(domain, filename, raw) {
+  const match = raw.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n([\s\S]*)$/);
+  if (!match) return null;
+  const metadata = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    const split = line.indexOf(":");
+    if (split < 1) continue;
+    metadata[line.slice(0, split).trim()] = line.slice(split + 1).trim();
+  }
+  if (!/^[a-z0-9][a-z0-9-]{1,79}$/.test(metadata.id || "") || !metadata.title || !metadata.summary) return null;
+  return {
+    id: metadata.id,
+    title: metadata.title,
+    summary: metadata.summary,
+    domain,
+    tags: (metadata.tags || "").split(",").map(tag => tag.trim()).filter(Boolean),
+    sourceName: metadata.sourceName || "JDAP working guidance",
+    sourceUrl: metadata.sourceUrl || "",
+    updated: metadata.updated || "",
+    filename,
+    content: match[2].trim()
+  };
+}
+
+async function readAllDocuments() {
+  const documents = [];
+  for (const domain of DOMAINS) {
+    const directory = path.join(KNOWLEDGE_ROOT, domain);
+    let files;
+    try { files = await readdir(directory, { withFileTypes: true }); }
+    catch (error) { if (error.code === "ENOENT") continue; throw error; }
+    for (const file of files) {
+      if (!file.isFile() || !file.name.toLowerCase().endsWith(".md") || file.name.startsWith("_")) continue;
+      const raw = await readFile(path.join(directory, file.name), "utf8");
+      const document = parseDocument(domain, file.name, raw);
+      if (document) documents.push(document);
+    }
+  }
+  return documents.sort((a, b) => a.domain.localeCompare(b.domain) || a.title.localeCompare(b.title));
+}
+
+export async function listKnowledge({ query = "", domain = "" } = {}) {
+  const docs = await readAllDocuments();
+  const normalizedQuery = String(query).trim().toLowerCase();
+  const normalizedDomain = String(domain).trim().toLowerCase();
+  return docs.filter(doc => {
+    if (normalizedDomain && normalizedDomain !== "all" && doc.domain !== normalizedDomain) return false;
+    if (!normalizedQuery) return true;
+    return [doc.title, doc.summary, doc.domain, ...doc.tags, doc.content].join(" ").toLowerCase().includes(normalizedQuery);
+  }).map(({ content, ...summary }) => summary);
+}
+
+export async function getKnowledge(id) {
+  const docs = await readAllDocuments();
+  return docs.find(doc => doc.id === id) || null;
+}
+
+export const knowledgeDomains = [...DOMAINS];

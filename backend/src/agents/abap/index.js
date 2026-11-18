@@ -1,0 +1,17 @@
+const billingReportDraft = `REPORT z_jdap_billing_extract.\n\n* Draft only. Verify field availability, authorization design,\n* output requirements and performance in the target development system.\n\nTABLES: vbrk, vbrp.\n\nTYPES: BEGIN OF ty_header,\n         vbeln TYPE vbrk-vbeln,\n         fkdat TYPE vbrk-fkdat,\n         kunag TYPE vbrk-kunag,\n         vkorg TYPE vbrk-vkorg,\n         waerk TYPE vbrk-waerk,\n         netwr TYPE vbrk-netwr,\n       END OF ty_header.\nTYPES: BEGIN OF ty_item,\n         vbeln TYPE vbrp-vbeln,\n         posnr TYPE vbrp-posnr,\n         matnr TYPE vbrp-matnr,\n         arktx TYPE vbrp-arktx,\n         fkimg TYPE vbrp-fkimg,\n         vrkme TYPE vbrp-vrkme,\n         netwr TYPE vbrp-netwr,\n       END OF ty_item.\n\nDATA: gt_header TYPE STANDARD TABLE OF ty_header,\n      gs_header TYPE ty_header,\n      gt_item   TYPE STANDARD TABLE OF ty_item,\n      gs_item   TYPE ty_item.\n\nSELECT-OPTIONS: s_fkdat FOR vbrk-fkdat OBLIGATORY,\n                s_vbeln FOR vbrk-vbeln,\n                s_kunag FOR vbrk-kunag.\nPARAMETERS: p_vkorg TYPE vbrk-vkorg OBLIGATORY.\n\nSTART-OF-SELECTION.\n  AUTHORITY-CHECK OBJECT 'V_VBRK_VKO'\n    ID 'VKORG' FIELD p_vkorg\n    ID 'ACTVT' FIELD '03'.\n  IF sy-subrc <> 0.\n    MESSAGE 'Not authorized to display billing documents for this sales organization' TYPE 'E'.\n  ENDIF.\n\n  SELECT vbeln fkdat kunag vkorg waerk netwr\n    INTO TABLE gt_header\n    FROM vbrk\n    WHERE vkorg = p_vkorg\n      AND fkdat IN s_fkdat\n      AND vbeln IN s_vbeln\n      AND kunag IN s_kunag.\n\n  IF gt_header IS INITIAL.\n    WRITE: / 'No billing documents match the selection.'.\n    RETURN.\n  ENDIF.\n\n  WRITE: / 'Billing document headers'.\n  LOOP AT gt_header INTO gs_header.\n    WRITE: / gs_header-vbeln, gs_header-fkdat, gs_header-kunag,\n             gs_header-vkorg, gs_header-netwr, gs_header-waerk.\n  ENDLOOP.\n\n  SELECT vbeln posnr matnr arktx fkimg vrkme netwr\n    INTO TABLE gt_item\n    FROM vbrp\n    FOR ALL ENTRIES IN gt_header\n    WHERE vbeln = gt_header-vbeln.\n\n  WRITE: / 'Billing document items'.\n  LOOP AT gt_item INTO gs_item.\n    WRITE: / gs_item-vbeln, gs_item-posnr, gs_item-matnr,\n             gs_item-arktx, gs_item-fkimg, gs_item-vrkme, gs_item-netwr.\n  ENDLOOP.\n\n* This classic list is a minimal draft. Consider ALV, paging or a\n* validated maximum date span for real-world data volumes.`;
+
+function requestedZProgramName(prompt) {
+  const text = String(prompt || "");
+  const match = /\b(?:program|report)\s+name\s+(?:(?:as|is|named)\s+)?(Z[A-Z0-9_]{1,39})\b/i.exec(text)
+    || /\b(?:program|report)\s+named\s+(Z[A-Z0-9_]{1,39})\b/i.exec(text)
+    || /\b(?:REPORT|PROGRAM)\s+(Z[A-Z0-9_]{1,39})\b/i.exec(text);
+  return match?.[1]?.toLowerCase() || "z_jdap_billing_extract";
+}
+
+export default {
+  id: "abap", name: "ABAP Developer", specialty: "ABAP engineering",
+  description: "Creates ABAP reports, classes, enhancements and function-module drafts.",
+  mockResponse: ({ prompt }) => /billing|invoice|vbrk|vbrp/i.test(prompt) && /report|extract|header|item/i.test(prompt)
+    ? billingReportDraft.replace(/^REPORT\s+z_jdap_billing_extract\./im, `REPORT ${requestedZProgramName(prompt)}.`)
+    : `ABAP draft guidance for: "${prompt}"\nREPORT z_jdap_generated.\n\n* Draft only — validate in the target ABAP system.\nPARAMETERS p_test AS CHECKBOX DEFAULT 'X'.\n\nSTART-OF-SELECTION.\n  WRITE: / 'JDAP generated ABAP draft'.\n  WRITE: / 'Replace this scaffold with validated business logic'.`
+};
