@@ -257,3 +257,14 @@ The source also includes npm scripts for native development, but this ZIP's docu
 JDAP provides an optional local stdio MCP server with two read-only tools: `search_approved_jdap_guidance` and `read_approved_jdap_guide`. They only return local Knowledge Hub documents marked `workflowApproved: true`, enforce excerpt/document size limits, and include source attribution. The process does not expose HTTP or provide SAP, approval, GitHub, CTS, activation, or other write operations.
 
 To connect a local MCP host while the JDAP backend container is running, configure it to launch `docker` with arguments `compose exec -T backend node /app/src/mcp/server.js`, using the JDAP project directory containing `docker-compose.yml` as its working directory. See `backend/src/mcp/README.md`.
+
+Set-Location "$env:USERPROFILE\Desktop"
+git clone https://github.com/btpsapabap-gif/JDAP-Final.git
+Set-Location .\JDAP-Final
+
+'AI_PROVIDER=mock' | Set-Content -LiteralPath '.env' -Encoding ascii
+
+docker compose up --build -d
+docker compose ps
+docker compose logs --tail 50 backend
+Invoke-RestMethod 'http://localhost:4001/api/health' | Format-List
